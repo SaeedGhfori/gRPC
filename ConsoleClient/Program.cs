@@ -1,18 +1,54 @@
-﻿using System.Text;
+using System.Net.Http;
+using System.Text;
+using ConsoleClient.Interceptors;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
+using Grpc.Net.Client.Configuration;
 using grpcServer.Protos;
-using ConsoleClient.Interceptors;
 
 Console.OutputEncoding = Encoding.UTF8;
 
 const string serverAddress = "https://localhost:7164/";
 
+// اینترسپتور خطا برای خواندن کد ماشینی از تریلر
 var errorInterceptor = new ClientErrorInterceptor();
-using var channel = GrpcChannel.ForAddress(serverAddress);
+
+// ۹. Retry Policy + ۱۰. Load Balancing + ۷. Compression + ۸. Keepalive
+using var channel = GrpcChannel.ForAddress(serverAddress, new GrpcChannelOptions
+{
+    ServiceConfig = new ServiceConfig
+    {
+        MethodConfigs =
+        {
+            new MethodConfig
+            {
+                Names = { MethodName.Default },
+                RetryPolicy = new RetryPolicy
+                {
+                    MaxAttempts = 3,
+                    InitialBackoff = TimeSpan.FromSeconds(1),
+                    MaxBackoff = TimeSpan.FromSeconds(5),
+                    BackoffMultiplier = 2,
+                    RetryableStatusCodes = { StatusCode.Unavailable }
+                }
+            }
+        },
+        LoadBalancingConfigs = { new RoundRobinConfig() }
+    },
+    CompressionProviders = { new GzipCompressionProvider(System.IO.Compression.CompressionLevel.Fastest) },
+    HttpHandler = new SocketsHttpHandler
+    {
+        KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(60),
+    },
+});
+
 var client = new ProductService.ProductServiceClient(channel.Intercept(errorInterceptor));
+
+// ۱. Deadline: مهلت ۱۰ ثانیه‌ای برای هر کال
+var deadline = DateTime.UtcNow.AddSeconds(10);
 
 Console.WriteLine("==============================================");
 Console.WriteLine("   کلاینت کنسولی gRPC - مدیریت محصولات");
@@ -38,12 +74,12 @@ while (true)
     {
         switch (choice)
         {
-            case "1": await AddProductsAsync(client); break;
-            case "2": await UpdateProductAsync(client); break;
-            case "3": await GetProductByIdAsync(client); break;
-            case "4": await DeleteProductsAsync(client); break;
-            case "5": await GetAllProductsStreamAsync(client); break;
-            case "6": await GetAllPagedAsync(client); break;
+            case "1": await AddProductsAsync(client, deadline); break;
+            case "2": await UpdateProductAsync(client, deadline); break;
+            case "3": await GetProductByIdAsync(client, deadline); break;
+            case "4": await DeleteProductsAsync(client, deadline); break;
+            case "5": await GetAllProductsStreamAsync(client, deadline); break;
+            case "6": await GetAllPagedAsync(client, deadline); break;
             case "0": return;
             default: Console.WriteLine("گزینه نامعتبر است."); break;
         }
@@ -51,10 +87,10 @@ while (true)
     catch (RpcException ex)
     {
         Console.ForegroundColor = ConsoleColor.Red;
-        var machineCode = errorInterceptor.LastErrorCode;
+        var machineCode = errorInterceptor.LastErrorCode ?? ex.Trailers.GetValue("x-error-code");
         Console.WriteLine($"خطای gRPC [{ex.StatusCode}]: {ex.Status.Detail}");
         if (!string.IsNullOrEmpty(machineCode))
-            Console.WriteLine($"  کد ماشینی (اینترسپتور فرانت): {machineCode}");
+            Console.WriteLine($"  کد ماشینی (اینترسپتور): {machineCode}");
         Console.ResetColor();
     }
     catch (Exception ex)
@@ -65,12 +101,23 @@ while (true)
     }
 }
 
+// ------------------------- ۵. Metadata سمت کلاینت -------------------------
+// ارسال هدر (Metadata) در هر کال:
+//   var headers = new Metadata { { "x-request-id", Guid.NewGuid().ToString() } };
+//   await client.GetProductByIdAsync(request, headers, deadline);
+//
+// خواندن تریلر پاسخ:
+//   var trailers = ex.Trailers;  // شامل x-error-code
+
 // ------------------------- افزودن گروهی (Bidirectional) -------------------------
-static async Task AddProductsAsync(ProductService.ProductServiceClient client)
+static async Task AddProductsAsync(ProductService.ProductServiceClient client, DateTime deadline)
 {
     Console.WriteLine("نام و قیمت را با کاما وارد کنید (مثلاً: laptop,250000). خط خالی = پایان:");
 
-    using var call = client.AddProduct();
+    // ۵. ارسال Metadata (x-request-id) در هدر درخواست
+    var headers = new Metadata { { "x-request-id", Guid.NewGuid().ToString() } };
+
+    using var call = client.AddProduct(headers, deadline);
 
     // خواندن پاسخ‌ها به صورت همزمان (دوطرفه بودن واقعی)
     var readTask = Task.Run(async () =>
@@ -114,7 +161,7 @@ static async Task AddProductsAsync(ProductService.ProductServiceClient client)
 }
 
 // ------------------------- ویرایش (Unary) -------------------------
-static async Task UpdateProductAsync(ProductService.ProductServiceClient client)
+static async Task UpdateProductAsync(ProductService.ProductServiceClient client, DateTime deadline)
 {
     var id = ReadInt("شناسه: ");
     Console.Write("نام جدید: ");
@@ -126,12 +173,13 @@ static async Task UpdateProductAsync(ProductService.ProductServiceClient client)
     }
     var price = ReadInt("قیمت جدید: ");
 
+    var headers = new Metadata { { "x-request-id", Guid.NewGuid().ToString() } };
     var reply = await client.UpdateProductAsync(new ProductRequest
     {
         Id = id,
         Name = name,
         Price = price
-    });
+    }, headers, deadline);
 
     Console.ForegroundColor = ConsoleColor.Green;
     Console.Write("  ویرایش شد: ");
@@ -140,17 +188,18 @@ static async Task UpdateProductAsync(ProductService.ProductServiceClient client)
 }
 
 // ------------------------- دریافت با شناسه (Unary) -------------------------
-static async Task GetProductByIdAsync(ProductService.ProductServiceClient client)
+static async Task GetProductByIdAsync(ProductService.ProductServiceClient client, DateTime deadline)
 {
     var id = ReadInt("شناسه: ");
 
-    var reply = await client.GetProductByIdAsync(new ProductByIdRequest { Id = id });
+    var headers = new Metadata { { "x-request-id", Guid.NewGuid().ToString() } };
+    var reply = await client.GetProductByIdAsync(new ProductByIdRequest { Id = id }, headers, deadline);
     Console.Write("  نتیجه: ");
     PrintProduct(reply);
 }
 
 // ------------------------- حذف چندتایی (Client Stream) -------------------------
-static async Task DeleteProductsAsync(ProductService.ProductServiceClient client)
+static async Task DeleteProductsAsync(ProductService.ProductServiceClient client, DateTime deadline)
 {
     Console.Write("شناسه‌ها را با فاصله یا کاما وارد کنید (مثلاً: 3,7,12): ");
     var raw = Console.ReadLine() ?? string.Empty;
@@ -167,7 +216,8 @@ static async Task DeleteProductsAsync(ProductService.ProductServiceClient client
         return;
     }
 
-    using var call = client.DeleteProduct();
+    var headers = new Metadata { { "x-request-id", Guid.NewGuid().ToString() } };
+    using var call = client.DeleteProduct(headers, deadline);
 
     foreach (var id in ids)
         await call.RequestStream.WriteAsync(new ProductByIdRequest { Id = id });
@@ -179,9 +229,10 @@ static async Task DeleteProductsAsync(ProductService.ProductServiceClient client
 }
 
 // ------------------------- دریافت همه (Server Stream) -------------------------
-static async Task GetAllProductsStreamAsync(ProductService.ProductServiceClient client)
+static async Task GetAllProductsStreamAsync(ProductService.ProductServiceClient client, DateTime deadline)
 {
-    using var call = client.GetAllProduct(new Empty());
+    var headers = new Metadata { { "x-request-id", Guid.NewGuid().ToString() } };
+    using var call = client.GetAllProduct(new Empty(), headers, deadline);
 
     PrintHeader();
     var count = 0;
@@ -194,18 +245,19 @@ static async Task GetAllProductsStreamAsync(ProductService.ProductServiceClient 
 }
 
 // ------------------------- دریافت صفحه‌بندی (Unary) -------------------------
-static async Task GetAllPagedAsync(ProductService.ProductServiceClient client)
+static async Task GetAllPagedAsync(ProductService.ProductServiceClient client, DateTime deadline)
 {
     var page = ReadInt("شماره صفحه: ");
     var pageSize = ReadInt("اندازه صفحه: ");
     if (page < 1) page = 1;
     if (pageSize < 1) pageSize = 20;
 
+    var headers = new Metadata { { "x-request-id", Guid.NewGuid().ToString() } };
     var response = await client.GetAllAsync(new RequestAllProduct
     {
         Page = page,
         PageSize = pageSize
-    });
+    }, headers, deadline);
 
     PrintHeader();
     foreach (var product in response.Items)

@@ -1,46 +1,54 @@
+using Grpc.AspNetCore.Server;
+using Grpc.AspNetCore.Server.Reflection;
 using grpcServer.GRPC;
-using grpcServer.Models;
-using grpcServer.Repository;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddControllersWithViews();
-builder.Services.AddGrpc(option =>
+builder.Services.AddGrpc(options =>
 {
-    option.EnableDetailedErrors = true;
-    option.Interceptors.Add<ExceptionInterceptor>();
+    // Configure message size limits
+    options.MaxReceiveMessageSize = 10 * 1024 * 1024; // 10MB
+    options.MaxSendMessageSize = 10 * 1024 * 1024; // 10MB
+
+    // Configure compression
+    options.EnableMessageCompression = true;
+    options.CompressionProviders = new List<CompressionProvider>
+    {
+        new CompressionProvider("gzip", new GZipCompressionProvider(CompressionLevel.Fastest))
+    };
+
+    // Configure keepalive
+    options.KeepAliveOptions = new KeepAliveOptions
+    {
+        AllowKeepAliveWithoutCalls = true,
+        KeepAliveTime = TimeSpan.FromMinutes(2),
+        KeepAliveTimeout = TimeSpan.FromSeconds(20)
+    };
+
+    // Enable deadline checking for all methods
+    options.EnableDetailedExceptions = true;
 });
-builder.Services.AddGrpcReflection();
 
-builder.Services.AddSingleton<ExceptionInterceptor>();
+// Register services
+builder.Services.AddSingleton<ProductgRPCService>();
+builder.Services.AddSingleton<ServerInterceptor>();
+builder.Services.AddGrpc(options =>
+{
+    options.Interceptors.Add<ServerInterceptor>();
+});
+
 builder.Services.AddSingleton<IProductRepository, ProductRepository>();
-
 
 var app = builder.Build();
 
-app.MapGrpcReflectionService();
-app.MapGrpcService<ProductgRPCService>();
-
-// Configure the HTTP request pipeline.
-if (!app.Environment.IsDevelopment())
-{
-    app.UseExceptionHandler("/Home/Error");
-    // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
-    app.UseHsts();
-}
-
-app.UseHttpsRedirection();
+// Configure the HTTP request pipeline
 app.UseRouting();
 
-app.UseAuthorization();
+// Map gRPC services
+app.MapGrpcService<ProductgRPCService>();
+app.MapGrpcService<ProductgRPCService>(); // Duplicate to test
 
-app.MapStaticAssets();
-
-app.MapControllerRoute(
-    name: "default",
-    pattern: "{controller=Home}/{action=Index}/{id?}")
-    .WithStaticAssets();
-
+// Map gRPC reflection endpoint
+app.MapGrpcReflectionService();
 
 app.Run();

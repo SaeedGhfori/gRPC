@@ -1,6 +1,8 @@
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
+using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
+using Grpc.Net.Client.Configuration;
 using grpcServer.Protos;
 using WinFormsClient.Interceptors;
 
@@ -17,6 +19,8 @@ namespace WinFormsClient
         private static readonly Color ColorInfo = Color.FromArgb(125, 211, 252);
         private static readonly Color ColorMuted = Color.FromArgb(148, 163, 184);
 
+        private static readonly TimeSpan CallDeadline = TimeSpan.FromSeconds(10);
+
         private GrpcChannel? _channel;
         private ClientErrorInterceptor? _errorInterceptor;
         private ProductService.ProductServiceClient? _client;
@@ -32,6 +36,9 @@ namespace WinFormsClient
 
         private ProductService.ProductServiceClient Client =>
             _client ?? throw new InvalidOperationException("اتصال برقرار نشده است.");
+
+        private static Metadata CreateHeaders() =>
+            new() { { "x-request-id", Guid.NewGuid().ToString() } };
 
         // ------------------------- اتصال -------------------------
         private async void Form1_Load(object sender, EventArgs e)
@@ -50,7 +57,34 @@ namespace WinFormsClient
 
             _channel?.Dispose();
             _errorInterceptor = new ClientErrorInterceptor();
-            _channel = GrpcChannel.ForAddress(address);
+            _channel = GrpcChannel.ForAddress(address, new GrpcChannelOptions
+            {
+                ServiceConfig = new ServiceConfig
+                {
+                    MethodConfigs =
+                    {
+                        new MethodConfig
+                        {
+                            Names = { MethodName.Default },
+                            RetryPolicy = new RetryPolicy
+                            {
+                                MaxAttempts = 3,
+                                InitialBackoff = TimeSpan.FromSeconds(1),
+                                MaxBackoff = TimeSpan.FromSeconds(5),
+                                BackoffMultiplier = 2,
+                                RetryableStatusCodes = { StatusCode.Unavailable }
+                            }
+                        }
+                    },
+                    LoadBalancingConfigs = { new RoundRobinConfig() }
+                },
+                CompressionProviders = { new GzipCompressionProvider(System.IO.Compression.CompressionLevel.Fastest) },
+                HttpHandler = new SocketsHttpHandler
+                {
+                    KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+                    KeepAlivePingTimeout = TimeSpan.FromSeconds(60),
+                },
+            });
             _client = new ProductService.ProductServiceClient(_channel.Intercept(_errorInterceptor));
             SetStatus("● متصل", ColorConnected);
             Log($"اتصال به {address} برقرار شد.", ColorMuted);
@@ -61,7 +95,7 @@ namespace WinFormsClient
             Connect(txtAddress.Text.Trim());
             await RunAsync("بررسی اتصال", async () =>
             {
-                await Client.GetAllAsync(new RequestAllProduct { Page = 1, PageSize = 1 });
+                await Client.GetAllAsync(new RequestAllProduct { Page = 1, PageSize = 1 }, CreateHeaders(), DateTime.UtcNow.Add(CallDeadline));
                 Log("ارتباط با سرور تایید شد.", ColorSuccess);
             });
         }
@@ -75,9 +109,8 @@ namespace WinFormsClient
             var count = (int)nudCount.Value;
             await RunAsync("افزودن", async () =>
             {
-                using var call = Client.AddProduct();
+                using var call = Client.AddProduct(CreateHeaders(), DateTime.UtcNow.Add(CallDeadline));
 
-                // خواندن پاسخ‌ها به صورت همزمان
                 var readTask = Task.Run(async () =>
                 {
                     var list = new List<ProductReply>();
@@ -124,7 +157,7 @@ namespace WinFormsClient
                     Id = id,
                     Name = name,
                     Price = price
-                });
+                }, CreateHeaders(), DateTime.UtcNow.Add(CallDeadline));
 
                 UpdateRowById(product);
                 Log($"#{product.Id} «{product.Name}» به قیمت {product.Price:N0} ویرایش شد (Unary).", ColorSuccess);
@@ -139,7 +172,7 @@ namespace WinFormsClient
 
             await RunAsync("دریافت محصول", async () =>
             {
-                var product = await Client.GetProductByIdAsync(new ProductByIdRequest { Id = id });
+                var product = await Client.GetProductByIdAsync(new ProductByIdRequest { Id = id }, CreateHeaders(), DateTime.UtcNow.Add(CallDeadline));
 
                 txtId.Text = product.Id.ToString();
                 txtName.Text = product.Name;
@@ -172,7 +205,7 @@ namespace WinFormsClient
 
             await RunAsync("حذف", async () =>
             {
-                using var call = Client.DeleteProduct();
+                using var call = Client.DeleteProduct(CreateHeaders(), DateTime.UtcNow.Add(CallDeadline));
 
                 foreach (var id in ids)
                     await call.RequestStream.WriteAsync(new ProductByIdRequest { Id = id });
@@ -191,7 +224,7 @@ namespace WinFormsClient
         {
             await RunAsync("دریافت همه", async () =>
             {
-                using var call = Client.GetAllProduct(new Empty());
+                using var call = Client.GetAllProduct(new Empty(), CreateHeaders(), DateTime.UtcNow.Add(CallDeadline));
 
                 dataGridView1.Rows.Clear();
                 var count = 0;
@@ -220,23 +253,21 @@ namespace WinFormsClient
                 return;
             }
 
-            await RunAsync("دریافت صفحه", () => LoadPagedAsync(page, pageSize));
-        }
-
-        private async Task LoadPagedAsync(int page, int pageSize)
-        {
-            var response = await Client.GetAllAsync(new RequestAllProduct
+            await RunAsync("دریافت صفحه", async () =>
             {
-                Page = page,
-                PageSize = pageSize
+                var response = await Client.GetAllAsync(new RequestAllProduct
+                {
+                    Page = page,
+                    PageSize = pageSize
+                }, CreateHeaders(), DateTime.UtcNow.Add(CallDeadline));
+
+                dataGridView1.Rows.Clear();
+                foreach (var product in response.Items)
+                    AddRow(product);
+
+                UpdateTotal();
+                Log($"صفحه {page} با {response.Items.Count} مورد دریافت شد (Unary).", ColorInfo);
             });
-
-            dataGridView1.Rows.Clear();
-            foreach (var product in response.Items)
-                AddRow(product);
-
-            UpdateTotal();
-            Log($"صفحه {page} با {response.Items.Count} مورد دریافت شد (Unary).", ColorInfo);
         }
 
         // ------------------------- انتخاب ردیف → پر کردن فیلدها -------------------------
@@ -286,7 +317,8 @@ namespace WinFormsClient
 
             foreach (DataGridViewRow row in dataGridView1.SelectedRows)
             {
-                if (TryGetCellId(row, out var id))
+                if (row.Cells["colId"].Value is not null &&
+                    int.TryParse(row.Cells["colId"].Value.ToString(), out var id))
                     ids.Add(id);
             }
 
@@ -306,7 +338,9 @@ namespace WinFormsClient
         {
             foreach (DataGridViewRow row in dataGridView1.Rows)
             {
-                if (TryGetCellId(row, out var id) && id == product.Id)
+                if (row.Cells["colId"].Value is not null &&
+                    int.TryParse(row.Cells["colId"].Value.ToString(), out var id) &&
+                    id == product.Id)
                 {
                     row.Cells["colName"].Value = product.Name;
                     row.Cells["colPrice"].Value = product.Price;
@@ -322,23 +356,20 @@ namespace WinFormsClient
             for (var i = dataGridView1.Rows.Count - 1; i >= 0; i--)
             {
                 var row = dataGridView1.Rows[i];
-                if (TryGetCellId(row, out var id) && ids.Contains(id))
+                if (row.Cells["colId"].Value is not null &&
+                    int.TryParse(row.Cells["colId"].Value.ToString(), out var id) &&
+                    ids.Contains(id))
                     dataGridView1.Rows.RemoveAt(i);
             }
-        }
-
-        private static bool TryGetCellId(DataGridViewRow row, out int id)
-        {
-            id = 0;
-            var value = row.Cells["colId"]?.Value;
-            return value is not null && int.TryParse(value.ToString(), out id);
         }
 
         private void HighlightRow(int id)
         {
             foreach (DataGridViewRow row in dataGridView1.Rows)
             {
-                if (TryGetCellId(row, out var rowId) && rowId == id)
+                if (row.Cells["colId"].Value is not null &&
+                    int.TryParse(row.Cells["colId"].Value.ToString(), out var rowId) &&
+                    rowId == id)
                 {
                     row.Selected = true;
                     dataGridView1.CurrentCell = row.Cells["colId"];
@@ -353,16 +384,22 @@ namespace WinFormsClient
         private void StyleGrid()
         {
             dataGridView1.EnableHeadersVisualStyles = false;
-            dataGridView1.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(30, 41, 59);
-            dataGridView1.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
-            dataGridView1.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10F, FontStyle.Bold);
-            dataGridView1.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            dataGridView1.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Color.FromArgb(30, 41, 59),
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+                Alignment = DataGridViewContentAlignment.MiddleCenter
+            };
             dataGridView1.DefaultCellStyle.Font = new Font("Segoe UI", 10F);
             dataGridView1.DefaultCellStyle.ForeColor = Color.FromArgb(30, 41, 59);
             dataGridView1.DefaultCellStyle.SelectionBackColor = Color.FromArgb(37, 99, 235);
             dataGridView1.DefaultCellStyle.SelectionForeColor = Color.White;
             dataGridView1.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            dataGridView1.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(248, 250, 252);
+            dataGridView1.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor = Color.FromArgb(248, 250, 252)
+            };
         }
 
         private void SetStatus(string text, Color color)

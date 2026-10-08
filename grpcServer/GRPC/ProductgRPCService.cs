@@ -20,18 +20,29 @@ namespace grpcServer.GRPC
             IServerStreamWriter<ProductReply> responseStream,
             ServerCallContext context)
         {
+            var deadline = context.Deadline;
+            if (deadline.HasValue && DateTime.UtcNow >= deadline.Value)
+            {
+                throw new RpcException(new Status(StatusCode.DeadlineExceeded, "Deadline exceeded before processing started."));
+            }
+
             await foreach (var request in requestStream.ReadAllAsync())
             {
-                var id = _repository.Add(request.Name, request.Price);
+                if (deadline.HasValue && DateTime.UtcNow >= deadline.Value)
+                {
+                    throw new RpcException(new Status(StatusCode.DeadlineExceeded, "Deadline exceeded while processing request."));
+                }
 
-                var product = _repository.GetById(id);
+                var id = _repository.Add(request.Name, request.Price, context.CancellationToken);
+
+                var product = _repository.GetById(id, context.CancellationToken);
 
                 await responseStream.WriteAsync(new ProductReply
                 {
                     Id = product.Id,
                     Name = product.Name,
                     Price = product.Price
-                });
+                }, cancellationToken: context.CancellationToken);
             }
         }
 
