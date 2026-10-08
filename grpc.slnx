@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/Client/">
+    <Project Path="ConsoleClient/ConsoleClient.csproj" />
+    <Project Path="WinFormsClient/WinFormsClient.csproj" />
+  </Folder>
+  <Folder Name="/Server/">
+    <Project Path="grpcServer/grpcServer.csproj" />
+  </Folder>
+</Solution>
