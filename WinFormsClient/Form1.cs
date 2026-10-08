@@ -18,6 +18,7 @@ namespace WinFormsClient
         private static readonly Color ColorMuted = Color.FromArgb(148, 163, 184);
 
         private GrpcChannel? _channel;
+        private ClientErrorInterceptor? _errorInterceptor;
         private ProductService.ProductServiceClient? _client;
         private Button[] _actions = [];
 
@@ -48,12 +49,9 @@ namespace WinFormsClient
             }
 
             _channel?.Dispose();
-            var interceptor = new WinFormsClient.Interceptors.ClientErrorInterceptor();
-            _channel = GrpcChannel.ForAddress(address, new GrpcChannelOptions
-            {
-                Interceptor = interceptor
-            });
-            _client = new ProductService.ProductServiceClient(_channel, interceptor);
+            _errorInterceptor = new ClientErrorInterceptor();
+            _channel = GrpcChannel.ForAddress(address);
+            _client = new ProductService.ProductServiceClient(_channel.Intercept(_errorInterceptor));
             SetStatus("● متصل", ColorConnected);
             Log($"اتصال به {address} برقرار شد.", ColorMuted);
         }
@@ -391,7 +389,7 @@ namespace WinFormsClient
             catch (RpcException ex)
             {
                 SetStatus("● خطا", ColorError);
-                var machineCode = ex.Trailers.GetValue("x-error-code");
+                var machineCode = _errorInterceptor?.LastErrorCode;
                 var detail = string.IsNullOrEmpty(machineCode)
                     ? $"{opName} ناموفق [{ex.StatusCode}]: {ex.Status.Detail}"
                     : $"{opName} ناموفق [{ex.StatusCode}/{machineCode}]: {ex.Status.Detail}";

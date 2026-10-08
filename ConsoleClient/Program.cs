@@ -10,12 +10,9 @@ Console.OutputEncoding = Encoding.UTF8;
 
 const string serverAddress = "https://localhost:7164/";
 
-using var interceptor = new ClientErrorInterceptor();
-var channel = GrpcChannel.ForAddress(serverAddress, new GrpcChannelOptions
-{
-    Interceptor = interceptor
-});
-var client = new ProductService.ProductServiceClient(channel, interceptor);
+var errorInterceptor = new ClientErrorInterceptor();
+using var channel = GrpcChannel.ForAddress(serverAddress);
+var client = new ProductService.ProductServiceClient(channel.Intercept(errorInterceptor));
 
 Console.WriteLine("==============================================");
 Console.WriteLine("   کلاینت کنسولی gRPC - مدیریت محصولات");
@@ -54,7 +51,7 @@ while (true)
     catch (RpcException ex)
     {
         Console.ForegroundColor = ConsoleColor.Red;
-        var machineCode = errorInterceptor.LastErrorCode ?? ex.Trailers.GetValue("x-error-code");
+        var machineCode = errorInterceptor.LastErrorCode;
         Console.WriteLine($"خطای gRPC [{ex.StatusCode}]: {ex.Status.Detail}");
         if (!string.IsNullOrEmpty(machineCode))
             Console.WriteLine($"  کد ماشینی (اینترسپتور فرانت): {machineCode}");
