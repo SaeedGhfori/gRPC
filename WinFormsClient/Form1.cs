@@ -2,6 +2,7 @@ using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Grpc.Net.Client;
 using grpcServer.Protos;
+using WinFormsClient.Interceptors;
 
 namespace WinFormsClient
 {
@@ -47,8 +48,12 @@ namespace WinFormsClient
             }
 
             _channel?.Dispose();
-            _channel = GrpcChannel.ForAddress(address);
-            _client = new ProductService.ProductServiceClient(_channel);
+            var interceptor = new WinFormsClient.Interceptors.ClientErrorInterceptor();
+            _channel = GrpcChannel.ForAddress(address, new GrpcChannelOptions
+            {
+                Interceptor = interceptor
+            });
+            _client = new ProductService.ProductServiceClient(_channel, interceptor);
             SetStatus("● متصل", ColorConnected);
             Log($"اتصال به {address} برقرار شد.", ColorMuted);
         }
@@ -386,7 +391,11 @@ namespace WinFormsClient
             catch (RpcException ex)
             {
                 SetStatus("● خطا", ColorError);
-                Log($"{opName} ناموفق [{ex.StatusCode}]: {ex.Status.Detail}", ColorErrorLog);
+                var machineCode = ex.Trailers.GetValue("x-error-code");
+                var detail = string.IsNullOrEmpty(machineCode)
+                    ? $"{opName} ناموفق [{ex.StatusCode}]: {ex.Status.Detail}"
+                    : $"{opName} ناموفق [{ex.StatusCode}/{machineCode}]: {ex.Status.Detail}";
+                Log(detail, ColorErrorLog);
             }
             catch (Exception ex)
             {

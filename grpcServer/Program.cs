@@ -6,9 +6,14 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
-builder.Services.AddGrpc();
+builder.Services.AddGrpc(option =>
+{
+    option.EnableDetailedErrors = true;
+    option.Interceptors.Add<ExceptionInterceptor>();
+});
 builder.Services.AddGrpcReflection();
 
+builder.Services.AddSingleton<ExceptionInterceptor>();
 builder.Services.AddSingleton<IProductRepository, ProductRepository>();
 
 
